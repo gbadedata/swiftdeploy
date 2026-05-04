@@ -133,14 +133,11 @@ swiftdeploy/
 │   ├── docker-compose.yml.tpl
 │   └── nginx.conf.tpl
 ├── screenshots/
-│   ├── 01_templates_docker_compose_tpl.png
-│   ├── 02_templates_nginx_conf_tpl.png
-│   ├── 03_init_generation.png
-│   ├── 04_validate_all_pass.png
-│   ├── 05_deploy_success.png
-│   ├── 06_root_endpoint_response.png
-│   ├── 07_canary_and_headers.png
-│   └── 08_nginx_logs_clean.png
+│   ├── 01_validate_all_pass.png
+│   ├── 02_deploy_success.png
+│   ├── 03_canary_and_headers.png
+│   ├── 04_generated_configs.png
+│   └── 05_nginx_logs_clean.png
 ├── .gitignore
 ├── Dockerfile
 ├── README.md
