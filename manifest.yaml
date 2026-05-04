@@ -1,0 +1,16 @@
+services:
+  image: swift-deploy-1-node:latest
+  port: 3000
+  mode: stable
+  version: 1.0.0
+  restart_policy: unless-stopped
+nginx:
+  image: nginx:latest
+  port: 8080
+  proxy_timeout: 10
+  contact: admin@gbadedata.com
+network:
+  name: swiftdeploy-net
+  driver_type: bridge
+logs:
+  volume_name: swiftdeploy-logs

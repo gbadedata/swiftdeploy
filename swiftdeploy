@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+try:
+    import yaml
+    from jinja2 import Environment, FileSystemLoader
+    import requests
+except ImportError as exc:
+    print(f"[FAIL] Missing Python dependency: {exc.name}")
+    print("Run: pip install pyyaml jinja2 requests")
+    sys.exit(1)
+
+
+ROOT = Path(__file__).resolve().parent
+MANIFEST_FILE = ROOT / "manifest.yaml"
+COMPOSE_FILE = ROOT / "docker-compose.yml"
+NGINX_FILE = ROOT / "nginx.conf"
+TEMPLATE_DIR = ROOT / "templates"
+
+REQUIRED_FIELDS = [
+    ("services", "image"),
+    ("services", "port"),
+    ("services", "mode"),
+    ("services", "version"),
+    ("services", "restart_policy"),
+    ("nginx", "image"),
+    ("nginx", "port"),
+    ("nginx", "proxy_timeout"),
+    ("nginx", "contact"),
+    ("network", "name"),
+    ("network", "driver_type"),
+    ("logs", "volume_name"),
+]
+
+
+def pass_msg(message):
+    print(f"[PASS] {message}")
+
+
+def fail_msg(message):
+    print(f"[FAIL] {message}")
+
+
+def info_msg(message):
+    print(f"[INFO] {message}")
+
+
+def run_command(command, check=False, capture=True):
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        text=True,
+        capture_output=capture,
+        shell=False,
+    )
+
+    if check and result.returncode != 0:
+        if result.stdout:
+            print(result.stdout.strip())
+        if result.stderr:
+            print(result.stderr.strip())
+        raise RuntimeError(f"Command failed: {' '.join(command)}")
+
+    return result
+
+
+def load_manifest():
+    if not MANIFEST_FILE.exists():
+        raise FileNotFoundError("manifest.yaml not found")
+
+    try:
+        with MANIFEST_FILE.open("r", encoding="utf-8") as file:
+            manifest = yaml.safe_load(file)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"manifest.yaml is not valid YAML: {exc}") from exc
+
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest.yaml must contain a YAML mapping/object")
+
+    return manifest
+
+
+def validate_required_fields(manifest):
+    missing = []
+
+    for section, key in REQUIRED_FIELDS:
+        if section not in manifest:
+            missing.append(f"{section}.{key}")
+            continue
+
+        if not isinstance(manifest[section], dict):
+            missing.append(f"{section}.{key}")
+            continue
+
+        value = manifest[section].get(key)
+
+        if value is None or value == "":
+            missing.append(f"{section}.{key}")
+
+    if missing:
+        raise ValueError("Missing or empty required fields: " + ", ".join(missing))
+
+
+def render_template(template_name, output_path, manifest):
+    env = Environment(
+        loader=FileSystemLoader(TEMPLATE_DIR),
+        autoescape=False,
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+
+    template = env.get_template(template_name)
+    rendered = template.render(**manifest)
+
+    output_path.write_text(rendered, encoding="utf-8")
+
+
+def command_init(_args):
+    try:
+        manifest = load_manifest()
+        validate_required_fields(manifest)
+
+        render_template("docker-compose.yml.tpl", COMPOSE_FILE, manifest)
+        render_template("nginx.conf.tpl", NGINX_FILE, manifest)
+
+        pass_msg("Loaded manifest.yaml")
+        pass_msg("Generated docker-compose.yml")
+        pass_msg("Generated nginx.conf")
+        return 0
+
+    except Exception as exc:
+        fail_msg(str(exc))
+        return 1
+
+
+def docker_image_exists(image):
+    result = run_command(["docker", "image", "inspect", image], capture=True)
+    return result.returncode == 0
+
+
+def is_port_free(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1)
+        return sock.connect_ex(("127.0.0.1", int(port))) != 0
+
+
+def nginx_config_is_valid(manifest):
+    if not NGINX_FILE.exists():
+        render_template("nginx.conf.tpl", NGINX_FILE, manifest)
+
+    nginx_image = manifest["nginx"]["image"]
+
+    command = [
+    "docker",
+    "run",
+    "--rm",
+    "--add-host",
+    "app:127.0.0.1",
+    "-v",
+    f"{NGINX_FILE.as_posix()}:/etc/nginx/nginx.conf:ro",
+    nginx_image,
+    "nginx",
+    "-t",
+]
+
+    result = run_command(command, capture=True)
+    return result.returncode == 0, result.stdout, result.stderr
+
+
+def command_validate(_args):
+    failed = False
+
+    try:
+        manifest = load_manifest()
+        pass_msg("manifest.yaml exists and is valid YAML")
+    except Exception as exc:
+        fail_msg(str(exc))
+        return 1
+
+    try:
+        validate_required_fields(manifest)
+        pass_msg("All required fields are present and non-empty")
+    except Exception as exc:
+        fail_msg(str(exc))
+        failed = True
+
+    image = manifest.get("services", {}).get("image")
+    if image and docker_image_exists(image):
+        pass_msg(f"Docker image exists locally: {image}")
+    else:
+        fail_msg(f"Docker image not found locally: {image}")
+        failed = True
+
+    nginx_port = manifest.get("nginx", {}).get("port")
+    if nginx_port and is_port_free(nginx_port):
+        pass_msg(f"Nginx port is free on host: {nginx_port}")
+    else:
+        fail_msg(f"Nginx port is already bound on host: {nginx_port}")
+        failed = True
+
+    try:
+        valid, stdout, stderr = nginx_config_is_valid(manifest)
+        if valid:
+            pass_msg("Generated nginx.conf is syntactically valid")
+        else:
+            fail_msg("Generated nginx.conf is not syntactically valid")
+            if stdout:
+                print(stdout.strip())
+            if stderr:
+                print(stderr.strip())
+            failed = True
+    except Exception as exc:
+        fail_msg(f"Could not validate nginx.conf: {exc}")
+        failed = True
+
+    return 1 if failed else 0
+
+
+def health_url(manifest):
+    return f"http://127.0.0.1:{manifest['nginx']['port']}/healthz"
+
+
+def wait_for_health(manifest, timeout_seconds=60):
+    url = health_url(manifest)
+    deadline = time.time() + timeout_seconds
+
+    while time.time() < deadline:
+        try:
+            response = requests.get(url, timeout=3)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "ok":
+                    return True, data
+        except requests.RequestException:
+            pass
+
+        time.sleep(2)
+
+    return False, None
+
+
+def command_deploy(_args):
+    init_code = command_init(_args)
+    if init_code != 0:
+        return init_code
+
+    validate_code = command_validate(_args)
+    if validate_code != 0:
+        fail_msg("Validation failed. Deployment stopped.")
+        return 1
+
+    try:
+        run_command(["docker", "compose", "up", "-d"], check=True, capture=True)
+        pass_msg("Docker Compose stack started")
+    except Exception as exc:
+        fail_msg(str(exc))
+        return 1
+
+    try:
+        manifest = load_manifest()
+        healthy, data = wait_for_health(manifest, timeout_seconds=60)
+
+        if not healthy:
+            fail_msg("Health check did not pass within 60 seconds")
+            return 1
+
+        pass_msg(f"Health check passed: mode={data.get('mode')}, version={data.get('version')}")
+        return 0
+
+    except Exception as exc:
+        fail_msg(str(exc))
+        return 1
+
+
+def update_manifest_mode(target_mode):
+    manifest = load_manifest()
+    validate_required_fields(manifest)
+
+    if target_mode not in {"stable", "canary"}:
+        raise ValueError("promote target must be either 'stable' or 'canary'")
+
+    manifest["services"]["mode"] = target_mode
+
+    with MANIFEST_FILE.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(
+            manifest,
+            file,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+
+    return manifest
+
+
+def command_promote(args):
+    target_mode = args.mode.lower()
+
+    try:
+        manifest = update_manifest_mode(target_mode)
+        pass_msg(f"Updated manifest.yaml mode to {target_mode}")
+
+        render_template("docker-compose.yml.tpl", COMPOSE_FILE, manifest)
+        pass_msg("Regenerated docker-compose.yml")
+
+        run_command(
+            ["docker", "compose", "up", "-d", "--no-deps", "--force-recreate", "app"],
+            check=True,
+            capture=True,
+        )
+        pass_msg("Restarted service container only")
+
+        healthy, data = wait_for_health(manifest, timeout_seconds=60)
+
+        if not healthy:
+            fail_msg("Health check did not pass after promotion")
+            return 1
+
+        active_mode = data.get("mode")
+        if active_mode != target_mode:
+            fail_msg(f"Expected mode={target_mode}, got mode={active_mode}")
+            return 1
+
+        pass_msg(f"Promotion confirmed through /healthz: mode={active_mode}")
+        return 0
+
+    except Exception as exc:
+        fail_msg(str(exc))
+        return 1
+
+
+def command_teardown(args):
+    try:
+        run_command(["docker", "compose", "down", "-v"], check=False, capture=True)
+        pass_msg("Removed containers, networks, and volumes")
+
+        if args.clean:
+            for generated_file in [COMPOSE_FILE, NGINX_FILE]:
+                if generated_file.exists():
+                    generated_file.unlink()
+                    pass_msg(f"Deleted generated file: {generated_file.name}")
+
+        return 0
+
+    except Exception as exc:
+        fail_msg(str(exc))
+        return 1
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="swiftdeploy",
+        description="Declarative deployment lifecycle tool for Docker and Nginx stacks.",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = subparsers.add_parser("init", help="Generate configs from manifest.yaml")
+    init_parser.set_defaults(func=command_init)
+
+    validate_parser = subparsers.add_parser("validate", help="Run pre-flight validation checks")
+    validate_parser.set_defaults(func=command_validate)
+
+    deploy_parser = subparsers.add_parser("deploy", help="Generate, validate, deploy, and wait for health")
+    deploy_parser.set_defaults(func=command_deploy)
+
+    promote_parser = subparsers.add_parser("promote", help="Promote deployment mode")
+    promote_parser.add_argument("mode", choices=["stable", "canary"])
+    promote_parser.set_defaults(func=command_promote)
+
+    teardown_parser = subparsers.add_parser("teardown", help="Remove stack resources")
+    teardown_parser.add_argument("--clean", action="store_true", help="Delete generated configs")
+    teardown_parser.set_defaults(func=command_teardown)
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
