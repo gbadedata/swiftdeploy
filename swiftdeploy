@@ -110,16 +110,16 @@ def validate_required_fields(manifest):
 
 def render_template(template_name, output_path, manifest):
     env = Environment(
-        loader=FileSystemLoader(TEMPLATE_DIR),
+        loader=FileSystemLoader(TEMPLATE_DIR, encoding="utf-8-sig"),
         autoescape=False,
         trim_blocks=True,
         lstrip_blocks=True,
     )
 
     template = env.get_template(template_name)
-    rendered = template.render(**manifest)
+    rendered = template.render(**manifest).lstrip("\ufeff")
 
-    output_path.write_text(rendered, encoding="utf-8")
+    output_path.write_bytes(rendered.encode("utf-8"))
 
 
 def command_init(_args):

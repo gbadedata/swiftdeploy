@@ -1,4 +1,4 @@
-services:
+﻿services:
   app:
     image: {{ services.image }}
     container_name: swiftdeploy-app
@@ -29,6 +29,7 @@ services:
     image: {{ nginx.image }}
     container_name: swiftdeploy-nginx
     restart: {{ services.restart_policy }}
+    user: "101:101"
     depends_on:
       app:
         condition: service_healthy
@@ -41,12 +42,6 @@ services:
       - {{ network.name }}
     cap_drop:
       - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-      - CHOWN
-      - DAC_OVERRIDE
-      - SETGID
-      - SETUID
     security_opt:
       - no-new-privileges:true
     healthcheck:

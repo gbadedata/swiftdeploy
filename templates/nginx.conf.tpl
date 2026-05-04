@@ -1,10 +1,18 @@
-events {}
+﻿events {}
+
+pid /tmp/nginx.pid;
 
 http {
     log_format swiftdeploy '$time_iso8601 | $status | ${request_time}s | $upstream_addr | $request';
 
-    access_log /var/log/nginx/access.log swiftdeploy;
-    error_log /var/log/nginx/error.log warn;
+    access_log /dev/stdout swiftdeploy;
+    error_log /dev/stderr warn;
+
+    client_body_temp_path /tmp/client_body_temp;
+    proxy_temp_path /tmp/proxy_temp;
+    fastcgi_temp_path /tmp/fastcgi_temp;
+    uwsgi_temp_path /tmp/uwsgi_temp;
+    scgi_temp_path /tmp/scgi_temp;
 
     upstream swiftdeploy_app {
         server app:{{ services.port }};
