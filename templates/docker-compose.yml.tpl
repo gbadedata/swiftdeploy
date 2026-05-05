@@ -51,6 +51,32 @@
       retries: 5
       start_period: 5s
 
+  opa:
+    image: {{ opa.image }}
+    container_name: swiftdeploy-opa
+    restart: {{ services.restart_policy }}
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:{{ opa.port }}"
+      - "/policies"
+    ports:
+      - "127.0.0.1:{{ opa.port }}:{{ opa.port }}"
+    volumes:
+      - ./{{ opa.policies_dir }}:/policies:ro
+    networks:
+      - {{ network.name }}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:{{ opa.port }}/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
 networks:
   {{ network.name }}:
     driver: {{ network.driver_type }}

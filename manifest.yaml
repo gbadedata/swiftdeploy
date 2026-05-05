@@ -1,16 +1,38 @@
 services:
   image: swift-deploy-1-node:latest
   port: 3000
-  mode: canary
-  version: 1.0.0
+  mode: stable
+  version: "1.0.0"
   restart_policy: unless-stopped
+
 nginx:
   image: nginx:latest
   port: 8080
   proxy_timeout: 10
-  contact: admin@gbadedata.com
+  contact: "admin@gbadedata.com"
+
+opa:
+  image: openpolicyagent/opa:latest
+  port: 8181
+  policies_dir: policies
+  decision_timeout_seconds: 5
+
 network:
   name: swiftdeploy-net
   driver_type: bridge
+
 logs:
   volume_name: swiftdeploy-logs
+
+policy_limits:
+  infrastructure:
+    min_disk_free_gb: 10
+    max_cpu_load: 2.0
+  canary:
+    max_error_rate: 0.01
+    max_p99_latency_ms: 500
+    evaluation_window_seconds: 30
+
+audit:
+  history_file: history.jsonl
+  report_file: audit_report.md
