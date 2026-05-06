@@ -4,4 +4,6 @@ __pycache__/
 docker-compose.yml
 nginx.conf
 chaos-*.json
+opa-infra-*.json
 history.jsonl
+audit_report.md

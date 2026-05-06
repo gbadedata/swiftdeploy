@@ -1,43 +1,31 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import os
+import re
+import shutil
 import socket
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-try:
-    import yaml
-    from jinja2 import Environment, FileSystemLoader
-    import requests
-except ImportError as exc:
-    print(f"[FAIL] Missing Python dependency: {exc.name}")
-    print("Run: pip install pyyaml jinja2 requests")
-    sys.exit(1)
+import requests
+import yaml
+from jinja2 import Environment, FileSystemLoader
 
 
-ROOT = Path(__file__).resolve().parent
-MANIFEST_FILE = ROOT / "manifest.yaml"
-COMPOSE_FILE = ROOT / "docker-compose.yml"
-NGINX_FILE = ROOT / "nginx.conf"
-TEMPLATE_DIR = ROOT / "templates"
+ROOT_DIR = Path(__file__).resolve().parent
+MANIFEST_FILE = ROOT_DIR / "manifest.yaml"
+TEMPLATE_DIR = ROOT_DIR / "templates"
+COMPOSE_FILE = ROOT_DIR / "docker-compose.yml"
+NGINX_FILE = ROOT_DIR / "nginx.conf"
 
-REQUIRED_FIELDS = [
-    ("services", "image"),
-    ("services", "port"),
-    ("services", "mode"),
-    ("services", "version"),
-    ("services", "restart_policy"),
-    ("nginx", "image"),
-    ("nginx", "port"),
-    ("nginx", "proxy_timeout"),
-    ("nginx", "contact"),
-    ("network", "name"),
-    ("network", "driver_type"),
-    ("logs", "volume_name"),
-]
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
 
 def pass_msg(message):
@@ -48,54 +36,64 @@ def fail_msg(message):
     print(f"[FAIL] {message}")
 
 
-def info_msg(message):
-    print(f"[INFO] {message}")
-
-
-def run_command(command, check=False, capture=True):
-    result = subprocess.run(
+def run_command(command, capture_output=True, check=False):
+    return subprocess.run(
         command,
-        cwd=ROOT,
+        cwd=ROOT_DIR,
         text=True,
-        capture_output=capture,
-        shell=False,
+        capture_output=capture_output,
+        check=check,
     )
-
-    if check and result.returncode != 0:
-        if result.stdout:
-            print(result.stdout.strip())
-        if result.stderr:
-            print(result.stderr.strip())
-        raise RuntimeError(f"Command failed: {' '.join(command)}")
-
-    return result
 
 
 def load_manifest():
     if not MANIFEST_FILE.exists():
-        raise FileNotFoundError("manifest.yaml not found")
+        raise FileNotFoundError("manifest.yaml does not exist")
 
-    try:
-        with MANIFEST_FILE.open("r", encoding="utf-8") as file:
-            manifest = yaml.safe_load(file)
-    except yaml.YAMLError as exc:
-        raise ValueError(f"manifest.yaml is not valid YAML: {exc}") from exc
+    with MANIFEST_FILE.open("r", encoding="utf-8-sig") as file:
+        data = yaml.safe_load(file)
 
-    if not isinstance(manifest, dict):
-        raise ValueError("manifest.yaml must contain a YAML mapping/object")
+    if not isinstance(data, dict):
+        raise ValueError("manifest.yaml is empty or invalid")
 
-    return manifest
+    return data
+
+
+def write_manifest(manifest):
+    content = yaml.safe_dump(manifest, sort_keys=False)
+    MANIFEST_FILE.write_bytes(content.encode("utf-8"))
+
+
+def required_fields():
+    return [
+        ("services", "image"),
+        ("services", "port"),
+        ("services", "mode"),
+        ("services", "version"),
+        ("services", "restart_policy"),
+        ("nginx", "image"),
+        ("nginx", "port"),
+        ("nginx", "proxy_timeout"),
+        ("nginx", "contact"),
+        ("network", "name"),
+        ("network", "driver_type"),
+        ("logs", "volume_name"),
+        ("opa", "image"),
+        ("opa", "port"),
+        ("opa", "policies_dir"),
+        ("opa", "decision_timeout_seconds"),
+        ("policy_limits", "infrastructure"),
+        ("policy_limits", "canary"),
+        ("audit", "history_file"),
+        ("audit", "report_file"),
+    ]
 
 
 def validate_required_fields(manifest):
     missing = []
 
-    for section, key in REQUIRED_FIELDS:
+    for section, key in required_fields():
         if section not in manifest:
-            missing.append(f"{section}.{key}")
-            continue
-
-        if not isinstance(manifest[section], dict):
             missing.append(f"{section}.{key}")
             continue
 
@@ -104,8 +102,7 @@ def validate_required_fields(manifest):
         if value is None or value == "":
             missing.append(f"{section}.{key}")
 
-    if missing:
-        raise ValueError("Missing or empty required fields: " + ", ".join(missing))
+    return len(missing) == 0, missing
 
 
 def render_template(template_name, output_path, manifest):
@@ -118,126 +115,130 @@ def render_template(template_name, output_path, manifest):
 
     template = env.get_template(template_name)
     rendered = template.render(**manifest).lstrip("\ufeff")
-
     output_path.write_bytes(rendered.encode("utf-8"))
 
 
-def command_init(_args):
+def cmd_init(_args=None):
     try:
         manifest = load_manifest()
-        validate_required_fields(manifest)
-
-        render_template("docker-compose.yml.tpl", COMPOSE_FILE, manifest)
-        render_template("nginx.conf.tpl", NGINX_FILE, manifest)
-
         pass_msg("Loaded manifest.yaml")
-        pass_msg("Generated docker-compose.yml")
-        pass_msg("Generated nginx.conf")
-        return 0
-
     except Exception as exc:
         fail_msg(str(exc))
         return 1
 
+    try:
+        render_template("docker-compose.yml.tpl", COMPOSE_FILE, manifest)
+        pass_msg("Generated docker-compose.yml")
+
+        render_template("nginx.conf.tpl", NGINX_FILE, manifest)
+        pass_msg("Generated nginx.conf")
+    except Exception as exc:
+        fail_msg(f"Config generation failed: {exc}")
+        return 1
+
+    return 0
+
 
 def docker_image_exists(image):
-    result = run_command(["docker", "image", "inspect", image], capture=True)
+    result = run_command(["docker", "image", "inspect", image])
     return result.returncode == 0
 
 
-def is_port_free(port):
+def port_is_free(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(1)
         return sock.connect_ex(("127.0.0.1", int(port))) != 0
 
 
 def nginx_config_is_valid(manifest):
-    if not NGINX_FILE.exists():
-        render_template("nginx.conf.tpl", NGINX_FILE, manifest)
-
     nginx_image = manifest["nginx"]["image"]
 
     command = [
-    "docker",
-    "run",
-    "--rm",
-    "--add-host",
-    "app:127.0.0.1",
-    "-v",
-    f"{NGINX_FILE.as_posix()}:/etc/nginx/nginx.conf:ro",
-    nginx_image,
-    "nginx",
-    "-t",
-]
+        "docker",
+        "run",
+        "--rm",
+        "--add-host",
+        "app:127.0.0.1",
+        "-v",
+        f"{NGINX_FILE.as_posix()}:/etc/nginx/nginx.conf:ro",
+        nginx_image,
+        "nginx",
+        "-t",
+    ]
 
-    result = run_command(command, capture=True)
-    return result.returncode == 0, result.stdout, result.stderr
+    result = run_command(command)
+    return result.returncode == 0, result.stderr + result.stdout
 
 
-def command_validate(_args):
-    failed = False
+def cmd_validate(_args=None):
+    all_ok = True
 
     try:
         manifest = load_manifest()
         pass_msg("manifest.yaml exists and is valid YAML")
     except Exception as exc:
-        fail_msg(str(exc))
+        fail_msg(f"manifest.yaml exists and is valid YAML: {exc}")
         return 1
 
-    try:
-        validate_required_fields(manifest)
+    ok, missing = validate_required_fields(manifest)
+    if ok:
         pass_msg("All required fields are present and non-empty")
-    except Exception as exc:
-        fail_msg(str(exc))
-        failed = True
+    else:
+        fail_msg(f"Missing required fields: {', '.join(missing)}")
+        all_ok = False
 
-    image = manifest.get("services", {}).get("image")
-    if image and docker_image_exists(image):
+    image = manifest["services"]["image"]
+    if docker_image_exists(image):
         pass_msg(f"Docker image exists locally: {image}")
     else:
-        fail_msg(f"Docker image not found locally: {image}")
-        failed = True
+        fail_msg(f"Docker image does not exist locally: {image}")
+        all_ok = False
 
-    nginx_port = manifest.get("nginx", {}).get("port")
-    if nginx_port and is_port_free(nginx_port):
+    nginx_port = manifest["nginx"]["port"]
+    if port_is_free(nginx_port):
         pass_msg(f"Nginx port is free on host: {nginx_port}")
     else:
         fail_msg(f"Nginx port is already bound on host: {nginx_port}")
-        failed = True
+        all_ok = False
 
-    try:
-        valid, stdout, stderr = nginx_config_is_valid(manifest)
-        if valid:
+    if not NGINX_FILE.exists():
+        fail_msg("Generated nginx.conf does not exist")
+        all_ok = False
+    else:
+        ok, output = nginx_config_is_valid(manifest)
+        if ok:
             pass_msg("Generated nginx.conf is syntactically valid")
         else:
             fail_msg("Generated nginx.conf is not syntactically valid")
-            if stdout:
-                print(stdout.strip())
-            if stderr:
-                print(stderr.strip())
-            failed = True
-    except Exception as exc:
-        fail_msg(f"Could not validate nginx.conf: {exc}")
-        failed = True
+            print(output.strip())
+            all_ok = False
 
-    return 1 if failed else 0
+    return 0 if all_ok else 1
 
 
-def health_url(manifest):
-    return f"http://127.0.0.1:{manifest['nginx']['port']}/healthz"
+def compose_up(service=None):
+    command = ["docker", "compose", "up", "-d"]
+
+    if service:
+        command.append(service)
+
+    result = run_command(command)
+
+    if result.returncode != 0:
+        fail_msg(result.stderr.strip() or result.stdout.strip())
+        return 1
+
+    return 0
 
 
-def wait_for_health(manifest, timeout_seconds=60):
-    url = health_url(manifest)
+def wait_for_http(url, timeout_seconds=60):
     deadline = time.time() + timeout_seconds
 
     while time.time() < deadline:
         try:
-            response = requests.get(url, timeout=3)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("status") == "ok":
-                    return True, data
+            res = requests.get(url, timeout=3)
+            if res.status_code == 200:
+                return True, res
         except requests.RequestException:
             pass
 
@@ -246,137 +247,730 @@ def wait_for_health(manifest, timeout_seconds=60):
     return False, None
 
 
-def command_deploy(_args):
-    init_code = command_init(_args)
-    if init_code != 0:
-        return init_code
+def wait_for_app_health(manifest, timeout_seconds=60):
+    port = manifest["nginx"]["port"]
+    url = f"http://127.0.0.1:{port}/healthz"
 
-    validate_code = command_validate(_args)
-    if validate_code != 0:
+    ok, res = wait_for_http(url, timeout_seconds)
+
+    if not ok:
+        return False, None
+
+    try:
+        return True, res.json()
+    except Exception:
+        return False, None
+
+
+def wait_for_opa(manifest, timeout_seconds=30):
+    port = manifest["opa"]["port"]
+    url = f"http://127.0.0.1:{port}/health"
+
+    ok, _res = wait_for_http(url, timeout_seconds)
+    return ok
+
+
+def get_opa_url(manifest):
+    return f"http://127.0.0.1:{manifest['opa']['port']}"
+
+
+def call_opa(manifest, policy_path, payload):
+    opa_url = get_opa_url(manifest)
+    timeout = int(manifest["opa"].get("decision_timeout_seconds", 5))
+
+    try:
+        res = requests.post(
+            f"{opa_url}/v1/data/{policy_path}",
+            json=payload,
+            timeout=timeout,
+        )
+    except requests.exceptions.ConnectionError:
+        return {
+            "allow": False,
+            "domain": "opa",
+            "question": "connectivity",
+            "reasons": [f"OPA unavailable at {opa_url}"],
+        }
+    except requests.exceptions.Timeout:
+        return {
+            "allow": False,
+            "domain": "opa",
+            "question": "timeout",
+            "reasons": [f"OPA decision timed out after {timeout}s"],
+        }
+    except requests.RequestException as exc:
+        return {
+            "allow": False,
+            "domain": "opa",
+            "question": "request_error",
+            "reasons": [f"OPA request failed: {exc}"],
+        }
+
+    if res.status_code != 200:
+        return {
+            "allow": False,
+            "domain": "opa",
+            "question": "http_error",
+            "reasons": [f"OPA returned HTTP {res.status_code}: {res.text[:200]}"],
+        }
+
+    try:
+        body = res.json()
+    except ValueError:
+        return {
+            "allow": False,
+            "domain": "opa",
+            "question": "malformed_response",
+            "reasons": ["OPA returned non-JSON response"],
+        }
+
+    decision = body.get("result")
+
+    if not isinstance(decision, dict):
+        return {
+            "allow": False,
+            "domain": "opa",
+            "question": "missing_result",
+            "reasons": ["OPA response did not include a decision result"],
+        }
+
+    decision.setdefault("allow", False)
+    decision.setdefault("reasons", ["OPA decision returned no reasoning"])
+
+    return decision
+
+
+def print_policy_decision(decision):
+    domain = decision.get("domain", "unknown")
+    question = decision.get("question", "unknown")
+    reasons = decision.get("reasons", [])
+
+    status = "PASS" if decision.get("allow") else "FAIL"
+    print(f"[POLICY][{status}] {domain}.{question}")
+
+    for reason in reasons:
+        print(f" - {reason}")
+
+
+def get_host_stats():
+    total, used, free = shutil.disk_usage(ROOT_DIR)
+    disk_free_gb = round(free / (1024 ** 3), 2)
+
+    try:
+        cpu_load = round(os.getloadavg()[0], 2)
+    except (AttributeError, OSError):
+        cpu_load = 0.0
+
+    memory_available_mb = 0
+
+    return {
+        "disk_free_gb": disk_free_gb,
+        "cpu_load": cpu_load,
+        "memory_available_mb": memory_available_mb,
+    }
+
+
+def append_history(manifest, event_type, data):
+    history_path = ROOT_DIR / manifest["audit"]["history_file"]
+
+    entry = {
+        "timestamp": now_iso(),
+        "event_type": event_type,
+        "data": data,
+    }
+
+    with history_path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(entry) + "\n")
+
+
+def pre_deploy_policy_check(manifest):
+    if compose_up("opa") != 0:
+        return False
+
+    if not wait_for_opa(manifest, 30):
+        fail_msg("OPA did not become healthy")
+        return False
+
+    stats = get_host_stats()
+    limits = manifest["policy_limits"]["infrastructure"]
+
+    payload = {
+        "input": {
+            "context": "pre_deploy",
+            "stats": stats,
+            "limits": limits,
+        }
+    }
+
+    decision = call_opa(
+        manifest,
+        "swiftdeploy/infrastructure/decision",
+        payload,
+    )
+
+    print_policy_decision(decision)
+
+    if not decision.get("allow"):
+        append_history(manifest, "policy_violation", {
+            "domain": decision.get("domain"),
+            "question": decision.get("question"),
+            "reasons": decision.get("reasons", []),
+            "stats": stats,
+        })
+        return False
+
+    return True
+
+
+def scrape_metrics(manifest):
+    port = manifest["nginx"]["port"]
+    url = f"http://127.0.0.1:{port}/metrics"
+
+    res = requests.get(url, timeout=5)
+    res.raise_for_status()
+    return res.text
+
+
+def parse_labels(label_text):
+    labels = {}
+
+    if not label_text:
+        return labels
+
+    matches = re.findall(r'(\w+)="([^"]*)"', label_text)
+    for key, value in matches:
+        labels[key] = value
+
+    return labels
+
+
+def parse_prometheus_metrics(text):
+    samples = []
+
+    for line in text.splitlines():
+        line = line.strip()
+
+        if not line or line.startswith("#"):
+            continue
+
+        match = re.match(
+            r"([a-zA-Z_:][a-zA-Z0-9_:]*)(\{([^}]*)\})?\s+([0-9.eE+-]+)",
+            line,
+        )
+
+        if not match:
+            continue
+
+        samples.append({
+            "name": match.group(1),
+            "labels": parse_labels(match.group(3)),
+            "value": float(match.group(4)),
+        })
+
+    return samples
+
+
+def calculate_observed_metrics(samples):
+    ignored_paths = {"/healthz", "/metrics"}
+
+    total_requests = 0.0
+    error_requests = 0.0
+
+    for sample in samples:
+        if sample["name"] != "http_requests_total":
+            continue
+
+        path = sample["labels"].get("path", "")
+        if path in ignored_paths:
+            continue
+
+        value = sample["value"]
+        total_requests += value
+
+        status_code = sample["labels"].get("status_code", "0")
+        if status_code.startswith("5"):
+            error_requests += value
+
+    error_rate = 0.0
+    if total_requests > 0:
+        error_rate = error_requests / total_requests
+
+    bucket_totals = {}
+
+    for sample in samples:
+        if sample["name"] != "http_request_duration_seconds_bucket":
+            continue
+
+        path = sample["labels"].get("path", "")
+        if path in ignored_paths:
+            continue
+
+        le = sample["labels"].get("le")
+        if le is None:
+            continue
+
+        bucket_totals[le] = bucket_totals.get(le, 0.0) + sample["value"]
+
+    p99_seconds = 0.0
+
+    if bucket_totals:
+        total_count = bucket_totals.get("+Inf", 0.0)
+
+        if total_count > 0:
+            target = total_count * 0.99
+            numeric_buckets = []
+
+            for le, count in bucket_totals.items():
+                if le == "+Inf":
+                    continue
+
+                try:
+                    numeric_buckets.append((float(le), count))
+                except ValueError:
+                    continue
+
+            numeric_buckets.sort(key=lambda item: item[0])
+
+            for upper_bound, count in numeric_buckets:
+                if count >= target:
+                    p99_seconds = upper_bound
+                    break
+
+            if p99_seconds == 0.0 and numeric_buckets:
+                p99_seconds = numeric_buckets[-1][0]
+
+    app_mode_value = 0.0
+    chaos_value = 0.0
+    uptime = 0.0
+
+    for sample in samples:
+        if sample["name"] == "app_mode":
+            app_mode_value = sample["value"]
+        elif sample["name"] == "chaos_active":
+            chaos_value = sample["value"]
+        elif sample["name"] == "app_uptime_seconds":
+            uptime = sample["value"]
+
+    mode = "canary" if app_mode_value == 1 else "stable"
+
+    if chaos_value == 1:
+        chaos = "slow"
+    elif chaos_value == 2:
+        chaos = "error"
+    else:
+        chaos = "none"
+
+    return {
+        "error_rate": round(error_rate, 6),
+        "p99_latency_ms": round(p99_seconds * 1000, 2),
+        "mode": mode,
+        "chaos": chaos,
+        "uptime_seconds": round(uptime, 2),
+        "total_requests": total_requests,
+        "error_requests": error_requests,
+    }
+
+
+def pre_promote_policy_check(manifest):
+    try:
+        metrics_text = scrape_metrics(manifest)
+        samples = parse_prometheus_metrics(metrics_text)
+        observed = calculate_observed_metrics(samples)
+    except Exception as exc:
+        fail_msg(f"Could not scrape or parse /metrics: {exc}")
+        append_history(manifest, "metrics_failure", {"error": str(exc)})
+        return False
+
+    limits = manifest["policy_limits"]["canary"]
+
+    payload = {
+        "input": {
+            "context": "pre_promote",
+            "metrics": {
+                "error_rate": observed["error_rate"],
+                "p99_latency_ms": observed["p99_latency_ms"],
+            },
+            "limits": limits,
+        }
+    }
+
+    decision = call_opa(
+        manifest,
+        "swiftdeploy/canary/decision",
+        payload,
+    )
+
+    print_policy_decision(decision)
+
+    append_history(manifest, "pre_promote_policy_check", {
+        "observed": observed,
+        "decision": decision,
+    })
+
+    return bool(decision.get("allow"))
+
+
+def cmd_deploy(_args=None):
+    if cmd_init() != 0:
+        return 1
+
+    if cmd_validate() != 0:
         fail_msg("Validation failed. Deployment stopped.")
         return 1
 
-    try:
-        run_command(["docker", "compose", "up", "-d"], check=True, capture=True)
-        pass_msg("Docker Compose stack started")
-    except Exception as exc:
-        fail_msg(str(exc))
-        return 1
-
-    try:
-        manifest = load_manifest()
-        healthy, data = wait_for_health(manifest, timeout_seconds=60)
-
-        if not healthy:
-            fail_msg("Health check did not pass within 60 seconds")
-            return 1
-
-        pass_msg(f"Health check passed: mode={data.get('mode')}, version={data.get('version')}")
-        return 0
-
-    except Exception as exc:
-        fail_msg(str(exc))
-        return 1
-
-
-def update_manifest_mode(target_mode):
     manifest = load_manifest()
-    validate_required_fields(manifest)
 
-    if target_mode not in {"stable", "canary"}:
-        raise ValueError("promote target must be either 'stable' or 'canary'")
+    if not pre_deploy_policy_check(manifest):
+        fail_msg("Deployment blocked by policy.")
+        return 1
 
-    manifest["services"]["mode"] = target_mode
+    if compose_up() != 0:
+        return 1
 
-    with MANIFEST_FILE.open("w", encoding="utf-8") as file:
-        yaml.safe_dump(
-            manifest,
-            file,
-            sort_keys=False,
-            default_flow_style=False,
-        )
+    pass_msg("Docker Compose stack started")
 
-    return manifest
+    healthy, health = wait_for_app_health(manifest, 60)
+
+    if not healthy:
+        fail_msg("Health check did not pass within 60 seconds")
+        return 1
+
+    pass_msg(
+        f"Health check passed: mode={health.get('mode')}, "
+        f"version={health.get('version')}"
+    )
+
+    append_history(manifest, "deploy", {
+        "mode": health.get("mode"),
+        "version": health.get("version"),
+    })
+
+    return 0
 
 
-def command_promote(args):
+def restart_app_container():
+    result = run_command(
+        ["docker", "compose", "up", "-d", "--no-deps", "--force-recreate", "app"]
+    )
+
+    if result.returncode != 0:
+        fail_msg(result.stderr.strip() or result.stdout.strip())
+        return 1
+
+    return 0
+
+
+def cmd_promote(args):
     target_mode = args.mode.lower()
 
-    try:
-        manifest = update_manifest_mode(target_mode)
-        pass_msg(f"Updated manifest.yaml mode to {target_mode}")
+    if target_mode not in {"stable", "canary"}:
+        fail_msg("Promotion target must be stable or canary")
+        return 1
 
-        render_template("docker-compose.yml.tpl", COMPOSE_FILE, manifest)
-        pass_msg("Regenerated docker-compose.yml")
+    manifest = load_manifest()
 
-        run_command(
-            ["docker", "compose", "up", "-d", "--no-deps", "--force-recreate", "app"],
-            check=True,
-            capture=True,
+    if target_mode == "stable":
+        if not pre_promote_policy_check(manifest):
+            fail_msg("Promotion blocked by policy.")
+            return 1
+
+    manifest["services"]["mode"] = target_mode
+    write_manifest(manifest)
+    pass_msg(f"Updated manifest.yaml mode to {target_mode}")
+
+    render_template("docker-compose.yml.tpl", COMPOSE_FILE, manifest)
+    pass_msg("Regenerated docker-compose.yml")
+
+    if restart_app_container() != 0:
+        return 1
+
+    pass_msg("Restarted service container only")
+
+    healthy, health = wait_for_app_health(manifest, 60)
+
+    if not healthy:
+        fail_msg("Promotion health check failed")
+        return 1
+
+    if health.get("mode") != target_mode:
+        fail_msg(f"Expected mode={target_mode}, got mode={health.get('mode')}")
+        return 1
+
+    pass_msg(f"Promotion confirmed through /healthz: mode={target_mode}")
+
+    append_history(manifest, "mode_change", {
+        "mode": target_mode,
+        "health": health,
+    })
+
+    return 0
+
+
+def cmd_teardown(args):
+    result = run_command(["docker", "compose", "down", "-v"])
+
+    if result.returncode != 0:
+        fail_msg(result.stderr.strip() or result.stdout.strip())
+        return 1
+
+    pass_msg("Removed containers, networks, and volumes")
+
+    if args.clean:
+        for generated_file in [COMPOSE_FILE, NGINX_FILE]:
+            if generated_file.exists():
+                generated_file.unlink()
+                pass_msg(f"Deleted generated file: {generated_file.name}")
+
+    return 0
+
+
+def cmd_status(args):
+    manifest = load_manifest()
+    interval = args.interval
+    once = args.once
+
+    previous_total = None
+    previous_time = None
+
+    while True:
+        try:
+            text = scrape_metrics(manifest)
+            samples = parse_prometheus_metrics(text)
+            observed = calculate_observed_metrics(samples)
+
+            total = observed["total_requests"]
+            current_time = time.time()
+
+            rps = 0.0
+            if previous_total is not None and previous_time is not None:
+                elapsed = current_time - previous_time
+                if elapsed > 0:
+                    rps = max((total - previous_total) / elapsed, 0)
+
+            previous_total = total
+            previous_time = current_time
+
+            infra_decision = call_opa(
+                manifest,
+                "swiftdeploy/infrastructure/decision",
+                {
+                    "input": {
+                        "context": "pre_deploy",
+                        "stats": get_host_stats(),
+                        "limits": manifest["policy_limits"]["infrastructure"],
+                    }
+                },
+            )
+
+            canary_decision = call_opa(
+                manifest,
+                "swiftdeploy/canary/decision",
+                {
+                    "input": {
+                        "context": "pre_promote",
+                        "metrics": {
+                            "error_rate": observed["error_rate"],
+                            "p99_latency_ms": observed["p99_latency_ms"],
+                        },
+                        "limits": manifest["policy_limits"]["canary"],
+                    }
+                },
+            )
+
+            print("SwiftDeploy Status")
+            print("==================")
+            print(f"Timestamp: {now_iso()}")
+            print(f"Mode: {observed['mode']}")
+            print(f"Chaos: {observed['chaos']}")
+            print(f"Req/s: {rps:.2f}")
+            print(f"Error rate: {observed['error_rate'] * 100:.2f}%")
+            print(f"P99 latency: {observed['p99_latency_ms']:.2f}ms")
+            print(f"Uptime: {observed['uptime_seconds']}s")
+            print()
+            print("Policy Compliance")
+            print("-----------------")
+
+            for decision in [infra_decision, canary_decision]:
+                status = "PASS" if decision.get("allow") else "FAIL"
+                print(
+                    f"[{status}] "
+                    f"{decision.get('domain', 'unknown')}."
+                    f"{decision.get('question', 'unknown')}"
+                )
+
+                for reason in decision.get("reasons", []):
+                    print(f"  - {reason}")
+
+            append_history(manifest, "status_scrape", {
+                "observed": observed,
+                "rps": round(rps, 2),
+                "policy_results": [infra_decision, canary_decision],
+            })
+
+        except KeyboardInterrupt:
+            print("\nStatus stopped.")
+            return 0
+        except Exception as exc:
+            append_history(manifest, "status_error", {"error": str(exc)})
+            fail_msg(f"Status scrape failed: {exc}")
+            return 1
+
+        if once:
+            return 0
+
+        time.sleep(interval)
+
+
+def cmd_audit(_args=None):
+    manifest = load_manifest()
+
+    history_path = ROOT_DIR / manifest["audit"]["history_file"]
+    report_path = ROOT_DIR / manifest["audit"]["report_file"]
+
+    events = []
+
+    if history_path.exists():
+        with history_path.open("r", encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    mode_events = [
+        event for event in events
+        if event.get("event_type") in {"deploy", "mode_change"}
+    ]
+
+    violations = []
+
+    for event in events:
+        data = event.get("data", {})
+
+        if event.get("event_type") == "policy_violation":
+            violations.append(event)
+
+        decision = data.get("decision")
+        if isinstance(decision, dict) and not decision.get("allow", True):
+            violations.append({
+                "timestamp": event.get("timestamp"),
+                "event_type": "policy_violation",
+                "data": decision,
+            })
+
+        for decision in data.get("policy_results", []):
+            if isinstance(decision, dict) and not decision.get("allow", True):
+                violations.append({
+                    "timestamp": event.get("timestamp"),
+                    "event_type": "policy_violation",
+                    "data": decision,
+                })
+
+    report = []
+    report.append("# SwiftDeploy Audit Report")
+    report.append("")
+    report.append(f"Generated: `{now_iso()}`")
+    report.append("")
+    report.append("## Summary")
+    report.append("")
+    report.append(f"- Total audit events: `{len(events)}`")
+    report.append(f"- Mode/deploy events: `{len(mode_events)}`")
+    report.append(f"- Policy violations: `{len(violations)}`")
+    report.append("")
+    report.append("## Timeline")
+    report.append("")
+    report.append("| Timestamp | Event | Summary |")
+    report.append("|---|---|---|")
+
+    for event in mode_events:
+        data = event.get("data", {})
+        summary = json.dumps(data)
+        report.append(
+            f"| {event.get('timestamp')} | {event.get('event_type')} | `{summary}` |"
         )
-        pass_msg("Restarted service container only")
 
-        healthy, data = wait_for_health(manifest, timeout_seconds=60)
+    if not mode_events:
+        report.append("| - | - | No mode or deployment events recorded |")
 
-        if not healthy:
-            fail_msg("Health check did not pass after promotion")
-            return 1
+    report.append("")
+    report.append("## Policy Violations")
+    report.append("")
+    report.append("| Timestamp | Domain | Question | Reasons |")
+    report.append("|---|---|---|---|")
 
-        active_mode = data.get("mode")
-        if active_mode != target_mode:
-            fail_msg(f"Expected mode={target_mode}, got mode={active_mode}")
-            return 1
+    for violation in violations:
+        data = violation.get("data", {})
+        reasons = data.get("reasons", [])
 
-        pass_msg(f"Promotion confirmed through /healthz: mode={active_mode}")
-        return 0
+        if isinstance(reasons, list):
+            reason_text = "<br>".join(str(reason) for reason in reasons)
+        else:
+            reason_text = str(reasons)
 
-    except Exception as exc:
-        fail_msg(str(exc))
-        return 1
+        report.append(
+            f"| {violation.get('timestamp')} | "
+            f"{data.get('domain', 'unknown')} | "
+            f"{data.get('question', 'unknown')} | "
+            f"{reason_text} |"
+        )
 
+    if not violations:
+        report.append("| - | - | - | No policy violations recorded |")
 
-def command_teardown(args):
-    try:
-        run_command(["docker", "compose", "down", "-v"], check=False, capture=True)
-        pass_msg("Removed containers, networks, and volumes")
+    report.append("")
+    report.append("## Notes")
+    report.append("")
+    report.append(
+        "This report is generated from `history.jsonl` by `swiftdeploy audit`."
+    )
 
-        if args.clean:
-            for generated_file in [COMPOSE_FILE, NGINX_FILE]:
-                if generated_file.exists():
-                    generated_file.unlink()
-                    pass_msg(f"Deleted generated file: {generated_file.name}")
+    report_path.write_text("\n".join(report), encoding="utf-8")
+    pass_msg(f"Generated {report_path.name}")
 
-        return 0
-
-    except Exception as exc:
-        fail_msg(str(exc))
-        return 1
+    return 0
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="swiftdeploy",
-        description="Declarative deployment lifecycle tool for Docker and Nginx stacks.",
+        description="Declarative deployment lifecycle tool for Docker, Nginx, OPA, and observability.",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    init_parser = subparsers.add_parser("init", help="Generate configs from manifest.yaml")
-    init_parser.set_defaults(func=command_init)
+    subparsers.add_parser("init", help="Generate configs from manifest.yaml")
+    subparsers.add_parser("validate", help="Run pre-flight validation checks")
+    subparsers.add_parser(
+        "deploy",
+        help="Generate, validate, policy-check, deploy, and wait for health",
+    )
 
-    validate_parser = subparsers.add_parser("validate", help="Run pre-flight validation checks")
-    validate_parser.set_defaults(func=command_validate)
+    promote = subparsers.add_parser("promote", help="Promote deployment mode")
+    promote.add_argument("mode", choices=["stable", "canary"])
 
-    deploy_parser = subparsers.add_parser("deploy", help="Generate, validate, deploy, and wait for health")
-    deploy_parser.set_defaults(func=command_deploy)
+    teardown = subparsers.add_parser("teardown", help="Remove stack resources")
+    teardown.add_argument(
+        "--clean",
+        action="store_true",
+        help="Delete generated config files",
+    )
 
-    promote_parser = subparsers.add_parser("promote", help="Promote deployment mode")
-    promote_parser.add_argument("mode", choices=["stable", "canary"])
-    promote_parser.set_defaults(func=command_promote)
+    status = subparsers.add_parser(
+        "status",
+        help="Live metrics and policy dashboard",
+    )
+    status.add_argument("--interval", type=int, default=2)
+    status.add_argument("--once", action="store_true")
 
-    teardown_parser = subparsers.add_parser("teardown", help="Remove stack resources")
-    teardown_parser.add_argument("--clean", action="store_true", help="Delete generated configs")
-    teardown_parser.set_defaults(func=command_teardown)
+    subparsers.add_parser(
+        "audit",
+        help="Generate audit_report.md from history.jsonl",
+    )
 
     return parser
 
@@ -384,7 +978,30 @@ def build_parser():
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    return args.func(args)
+
+    if args.command == "init":
+        return cmd_init(args)
+
+    if args.command == "validate":
+        return cmd_validate(args)
+
+    if args.command == "deploy":
+        return cmd_deploy(args)
+
+    if args.command == "promote":
+        return cmd_promote(args)
+
+    if args.command == "teardown":
+        return cmd_teardown(args)
+
+    if args.command == "status":
+        return cmd_status(args)
+
+    if args.command == "audit":
+        return cmd_audit(args)
+
+    fail_msg("Unknown command")
+    return 1
 
 
 if __name__ == "__main__":

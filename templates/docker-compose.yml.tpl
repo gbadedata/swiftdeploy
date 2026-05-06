@@ -71,7 +71,7 @@
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:{{ opa.port }}/health"]
+      test: ["CMD", "/opa", "eval", "true"]
       interval: 10s
       timeout: 3s
       retries: 5
