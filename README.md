@@ -318,9 +318,9 @@ Returns runtime metrics in Prometheus text format. Tracked metrics include:
 |---|---|---|---|
 | `http_requests_total` | Counter | method, path, status_code | Total HTTP requests served |
 | `http_request_duration_seconds` | Histogram | method, path | Request latency with standard buckets |
-| `app_uptime_seconds` | Gauge | — | Seconds since process start |
-| `app_mode` | Gauge | — | 0 = stable, 1 = canary |
-| `chaos_active` | Gauge | — | 0 = none, 1 = slow, 2 = error |
+| `app_uptime_seconds` | Gauge | - | Seconds since process start |
+| `app_mode` | Gauge | - | 0 = stable, 1 = canary |
+| `chaos_active` | Gauge | - | 0 = none, 1 = slow, 2 = error |
 
 ### `POST /chaos`
 
@@ -705,7 +705,7 @@ Rules:
 
 ### Threshold configuration
 
-All threshold values are defined in `manifest.yaml` under `policy_limits`. Rego files read them from `input.limits`. Changing a threshold requires only editing the manifest — no Rego files need to be touched.
+All threshold values are defined in `manifest.yaml` under `policy_limits`. Rego files read them from `input.limits`. Changing a threshold requires only editing the manifest - no Rego files need to be touched.
 
 ### OPA failure handling
 
@@ -719,7 +719,7 @@ The CLI handles every distinct OPA failure mode with a specific, human-readable 
 | OPA response was not JSON | `OPA returned non-JSON response` |
 | OPA result missing | `OPA response did not include a decision result` |
 
-In all failure cases the operation is blocked — the CLI never proceeds when OPA is unreachable.
+In all failure cases the operation is blocked - the CLI never proceeds when OPA is unreachable.
 
 ### OPA isolation
 
@@ -738,7 +738,7 @@ Nginx has no route to port 8181. The OPA API is not accessible via the Nginx por
 
 ### `/metrics` endpoint
 
-The app exposes Prometheus-format metrics at `/metrics`. The status command scrapes this endpoint directly — no external Prometheus server is required.
+The app exposes Prometheus-format metrics at `/metrics`. The status command scrapes this endpoint directly - no external Prometheus server is required.
 
 Example output:
 
