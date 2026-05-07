@@ -1407,6 +1407,12 @@ Generated files are disposable and fully reproducible
 No deployment or promotion proceeds without explicit policy approval
 ```
 
+## Blog Post
+
+A full technical deep dive covering both Stage 4A and Stage 4B — the design, the policy engine, the chaos testing, and the lessons learned — is published at:
+
+**https://dev.to/gbadedata/from-broken-repo-to-policy-gated-deployment-platform-building-swiftdeploy-from-scratch-2nmo**
+
 The stack can be destroyed, generated files can be removed, and the complete runtime configuration - including the OPA sidecar, policy evaluation, metrics, and audit trail - can be recreated by running:
 
 ```powershell
