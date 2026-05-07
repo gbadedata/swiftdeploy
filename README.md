@@ -269,7 +269,7 @@ network:
   driver_type: bridge
 ```
 
-The `policy_limits` section is the only place threshold values are defined. Rego policies read these values from `input.limits` at evaluation time — nothing is hardcoded inside the policy files themselves.
+The `policy_limits` section is the only place threshold values are defined. Rego policies read these values from `input.limits` at evaluation time - nothing is hardcoded inside the policy files themselves.
 
 ---
 
@@ -449,7 +449,7 @@ The command waits up to 60 seconds for `/healthz` to become healthy.
 
 ### `promote canary`
 
-Switches service mode to canary without a policy check. Canary is an experimental mode — the gate applies when returning to stable.
+Switches service mode to canary without a policy check. Canary is an experimental mode - the gate applies when returning to stable.
 
 Command:
 
@@ -672,7 +672,7 @@ It defines:
 
 ## Policy Engine
 
-SwiftDeploy uses Open Policy Agent as an isolated policy sidecar. The CLI never makes allow/deny decisions itself — all decision logic lives exclusively in Rego policy files.
+SwiftDeploy uses Open Policy Agent as an isolated policy sidecar. The CLI never makes allow/deny decisions itself - all decision logic lives exclusively in Rego policy files.
 
 ### Architecture principle
 
@@ -1228,10 +1228,10 @@ The `screenshots/` folder contains submission evidence for both Stage A and Stag
 | `03_canary_and_headers.png` | A | Canary promotion, `X-Mode: canary`, `X-Deployed-By: swiftdeploy` |
 | `04_generated_configs.png` | A | Generated `docker-compose.yml` and `nginx.conf` contents |
 | `05_nginx_logs_clean.png` | A | Nginx access logs in required structured format |
-| `06_policy_hard_gate.png` | B | Deploy blocked by infrastructure policy — disk threshold exceeded |
+| `06_policy_hard_gate.png` | B | Deploy blocked by infrastructure policy - disk threshold exceeded |
 | `07_status_chaos.png` | B | Status dashboard showing chaos active and canary policy failing |
 | `08_promote_blocked.png` | B | Promotion to stable blocked by canary safety policy |
-| `09_promote_stable_clean.png` | B | Clean promotion after chaos recovery — policy passes |
+| `09_promote_stable_clean.png` | B | Clean promotion after chaos recovery - policy passes |
 | `10_audit_report.png` | B | Generated audit report with timeline and violations table |
 
 ---
@@ -1344,7 +1344,7 @@ Hardcoding limits inside Rego files makes them environment-specific and harder t
 
 ### Pre-promote gate on `promote stable`, not `promote canary`
 
-Promoting to canary is an intentional experiment. The safety gate applies on the return journey — when promoting back to stable - because that is when the operator needs to prove the canary was healthy before widening the blast radius.
+Promoting to canary is an intentional experiment. The safety gate applies on the return journey - when promoting back to stable - because that is when the operator needs to prove the canary was healthy before widening the blast radius.
 
 ### Non-blocking Slack-style alerting via history.jsonl
 
@@ -1409,7 +1409,7 @@ No deployment or promotion proceeds without explicit policy approval
 
 ## Blog Post
 
-A full technical deep dive covering both Stage A and Stage B — the design, the policy engine, the chaos testing, and the lessons learned — is published at:
+A full technical deep dive covering both Stage A and Stage B, the design, the policy engine, the chaos testing, and the lessons learned is published at:
 
 **https://dev.to/gbadedata/from-broken-repo-to-policy-gated-deployment-platform-building-swiftdeploy-from-scratch-2nmo**
 
