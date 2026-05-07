@@ -6,4 +6,3 @@ nginx.conf
 chaos-*.json
 opa-infra-*.json
 history.jsonl
-audit_report.md
