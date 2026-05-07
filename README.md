@@ -65,7 +65,7 @@ Beyond generation, SwiftDeploy acts as a policy-gated control plane. Before any 
 
 ## Project Requirements Covered
 
-SwiftDeploy satisfies the Stage 4A and Stage 4B task requirements as follows:
+SwiftDeploy satisfies the Stage A and Stage B task requirements as follows:
 
 | Requirement | Implementation |
 |---|---|
@@ -253,7 +253,7 @@ audit:
   report_file: audit_report.md
 ```
 
-The required base fields from Stage 4A are preserved unchanged:
+The required base fields from Stage A are preserved unchanged:
 
 ```yaml
 services:
@@ -1219,20 +1219,20 @@ The CLI validates `nginx.conf` by running `nginx -t` inside a temporary Nginx co
 
 ## Evidence and Screenshots
 
-The `screenshots/` folder contains submission evidence for both Stage 4A and Stage 4B.
+The `screenshots/` folder contains submission evidence for both Stage A and Stage B.
 
 | Screenshot | Stage | Purpose |
 |---|---|---|
-| `01_validate_all_pass.png` | 4A | All five validation checks passing |
-| `02_deploy_success.png` | 4A | Successful stable deployment with health check |
-| `03_canary_and_headers.png` | 4A | Canary promotion, `X-Mode: canary`, `X-Deployed-By: swiftdeploy` |
-| `04_generated_configs.png` | 4A | Generated `docker-compose.yml` and `nginx.conf` contents |
-| `05_nginx_logs_clean.png` | 4A | Nginx access logs in required structured format |
-| `06_policy_hard_gate.png` | 4B | Deploy blocked by infrastructure policy — disk threshold exceeded |
-| `07_status_chaos.png` | 4B | Status dashboard showing chaos active and canary policy failing |
-| `08_promote_blocked.png` | 4B | Promotion to stable blocked by canary safety policy |
-| `09_promote_stable_clean.png` | 4B | Clean promotion after chaos recovery — policy passes |
-| `10_audit_report.png` | 4B | Generated audit report with timeline and violations table |
+| `01_validate_all_pass.png` | A | All five validation checks passing |
+| `02_deploy_success.png` | A | Successful stable deployment with health check |
+| `03_canary_and_headers.png` | A | Canary promotion, `X-Mode: canary`, `X-Deployed-By: swiftdeploy` |
+| `04_generated_configs.png` | A | Generated `docker-compose.yml` and `nginx.conf` contents |
+| `05_nginx_logs_clean.png` | A | Nginx access logs in required structured format |
+| `06_policy_hard_gate.png` | B | Deploy blocked by infrastructure policy — disk threshold exceeded |
+| `07_status_chaos.png` | B | Status dashboard showing chaos active and canary policy failing |
+| `08_promote_blocked.png` | B | Promotion to stable blocked by canary safety policy |
+| `09_promote_stable_clean.png` | B | Clean promotion after chaos recovery — policy passes |
+| `10_audit_report.png` | B | Generated audit report with timeline and violations table |
 
 ---
 
@@ -1409,7 +1409,7 @@ No deployment or promotion proceeds without explicit policy approval
 
 ## Blog Post
 
-A full technical deep dive covering both Stage 4A and Stage 4B — the design, the policy engine, the chaos testing, and the lessons learned — is published at:
+A full technical deep dive covering both Stage A and Stage B — the design, the policy engine, the chaos testing, and the lessons learned — is published at:
 
 **https://dev.to/gbadedata/from-broken-repo-to-policy-gated-deployment-platform-building-swiftdeploy-from-scratch-2nmo**
 
